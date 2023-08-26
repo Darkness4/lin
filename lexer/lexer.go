@@ -36,7 +36,10 @@ func (l *Lexer) NextToken() (tok token.Token, lit string, err error) {
 	insertSemi := false
 	switch ch := l.ch; {
 	case unicode.IsLetter(ch):
-		lit = l.scanIdentifier()
+		lit, err = l.scanIdentifier()
+		if err != nil {
+			return token.Illegal, lit, err
+		}
 		if len(lit) > 1 {
 			// keywords are longer than one letter - avoid lookup otherwise
 			tok = token.Lookup(lit)
@@ -254,18 +257,20 @@ func (l *Lexer) peek() rune {
 	return rune(b[0])
 }
 
-func (l *Lexer) scanIdentifier() (lit string) {
+func (l *Lexer) scanIdentifier() (lit string, err error) {
 	lit += string(l.ch)
 
 	for {
-		if err := l.next(); err != nil || !token.IsIdentifier(string(l.ch)) {
-			break
+		if err := l.next(); err != nil {
+			return lit, err
 		}
 		lit += string(l.ch)
+		if !token.IsIdentifier(string(l.ch)) {
+			break
+		}
 	}
 
-	_ = l.input.UnreadRune()
-	return lit
+	return lit, nil
 }
 
 func (l *Lexer) scanNumber() (tok token.Token, lit string, err error) {
@@ -380,7 +385,6 @@ func (l *Lexer) scanNumber() (tok token.Token, lit string, err error) {
 		}
 	}
 
-	_ = l.input.UnreadRune()
 	return tok, lit, nil
 }
 
