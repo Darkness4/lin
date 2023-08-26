@@ -182,7 +182,8 @@ var tokens = [...]string{
 
 	Defer: "defer",
 
-	Goto: "goto",
+	Goto:   "goto",
+	Return: "return",
 }
 
 // String returns the string corresponding to the token tok.
@@ -264,7 +265,7 @@ func init() {
 	}
 }
 
-// IsKeyword reports whether name is a Go keyword, such as "func" or "return".
+// IsKeyword reports whether name is a Go keyword, such as "fn" or "return".
 func IsKeyword(name string) bool {
 	_, ok := keywords[name]
 	return ok

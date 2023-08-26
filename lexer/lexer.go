@@ -10,6 +10,10 @@ import (
 	"github.com/Darkness4/lin/token"
 )
 
+var (
+	invalidDigitError = errors.New("invalid digit")
+)
+
 const (
 	eof = -1
 )
@@ -21,10 +25,14 @@ type Lexer struct {
 }
 
 func New(r io.Reader) *Lexer {
-	return &Lexer{
+	l := &Lexer{
 		input:      bufio.NewReader(r),
 		insertSemi: false,
 	}
+	if nexterr := l.next(); nexterr != nil {
+		panic(nexterr)
+	}
+	return l
 }
 
 func (l *Lexer) NextToken() (tok token.Token, lit string, err error) {
@@ -54,12 +62,10 @@ func (l *Lexer) NextToken() (tok token.Token, lit string, err error) {
 	case (unicode.IsDigit(ch) || ch == '.' && unicode.IsDigit(l.peek())):
 		insertSemi = true
 		tok, lit, err = l.scanNumber()
-		if err != nil {
-			return tok, lit, err
-		}
 	default:
-		if err := l.next(); err != nil {
-			return token.Illegal, "", err
+		lit += string(l.ch)
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, "", nexterr
 		}
 		switch ch {
 		case eof:
@@ -101,11 +107,13 @@ func (l *Lexer) NextToken() (tok token.Token, lit string, err error) {
 			// fractions starting with a '.' are handled by outer switch
 			tok = token.Period
 			if l.ch == '.' && l.peek() == '.' {
-				if err := l.next(); err != nil {
-					return token.Illegal, "", err
+				lit += string(l.ch)
+				if nexterr := l.next(); nexterr != nil {
+					return token.Illegal, "", nexterr
 				}
-				if err := l.next(); err != nil { // consume last '.'
-					return token.Illegal, "", err
+				lit += string(l.ch)
+				if nexterr := l.next(); nexterr != nil { // consume last '.'
+					return token.Illegal, "", nexterr
 				}
 				tok = token.Ellipsis
 			}
@@ -227,14 +235,14 @@ func (l *Lexer) NextToken() (tok token.Token, lit string, err error) {
 		}
 	}
 	l.insertSemi = insertSemi
-	return tok, "", err
+	return tok, lit, err
 }
 
 func (l *Lexer) next() (err error) {
 	char, _, err := l.input.ReadRune()
 	if err == io.EOF {
 		l.ch = eof
-		return err
+		return nil
 	}
 	l.ch = char
 	return
@@ -242,8 +250,8 @@ func (l *Lexer) next() (err error) {
 
 func (l *Lexer) skipWhitespace() error {
 	for l.ch == ' ' || l.ch == '\t' || l.ch == '\n' && !l.insertSemi || l.ch == '\r' {
-		if err := l.next(); err != nil {
-			return err
+		if nexterr := l.next(); nexterr != nil {
+			return nexterr
 		}
 	}
 	return nil
@@ -258,24 +266,20 @@ func (l *Lexer) peek() rune {
 }
 
 func (l *Lexer) scanIdentifier() (lit string, err error) {
-	lit += string(l.ch)
-
-	for {
-		if err := l.next(); err != nil {
-			return lit, err
+	for i := 0; ; i++ {
+		if !unicode.IsLetter(l.ch) && l.ch != '_' && (i == 0 || !unicode.IsDigit(l.ch)) {
+			break
 		}
 		lit += string(l.ch)
-		if !token.IsIdentifier(string(l.ch)) {
-			break
+		if nexterr := l.next(); nexterr != nil {
+			return lit, nexterr
 		}
 	}
 
 	return lit, nil
 }
 
-func (l *Lexer) scanNumber() (tok token.Token, lit string, err error) {
-	lit += string(l.ch)
-
+func (l *Lexer) scanNumber() (tok token.Token, lit string, firsterr error) {
 	base := 10        // number base
 	prefix := rune(0) // one of 0 (decimal), '0' (0-octal), 'x', 'o', or 'b'
 	digsep := 0       // bit 0: digit present, bit 1: '_' present
@@ -283,39 +287,40 @@ func (l *Lexer) scanNumber() (tok token.Token, lit string, err error) {
 	// integer part
 	if l.ch != '.' {
 		tok = token.Integer
+
+		// 0x/0o/0b prefixes
 		if l.ch == '0' {
-			if err = l.next(); err != nil {
-				return token.Illegal, lit, err
-			}
 			lit += string(l.ch)
+			if nexterr := l.next(); nexterr != nil {
+				return token.Illegal, lit, nexterr
+			}
 			switch unicode.ToLower(l.ch) {
 			case 'x':
-				if err = l.next(); err != nil {
-					return token.Illegal, lit, err
-				}
 				lit += string(l.ch)
+				if nexterr := l.next(); nexterr != nil {
+					return token.Illegal, lit, nexterr
+				}
 				base, prefix = 16, 'x'
 			case 'o':
-				if err = l.next(); err != nil {
-					return token.Illegal, lit, err
-				}
 				lit += string(l.ch)
+				if nexterr := l.next(); nexterr != nil {
+					return token.Illegal, lit, nexterr
+				}
 				base, prefix = 8, 'o'
 			case 'b':
-				if err = l.next(); err != nil {
-					return token.Illegal, lit, err
-				}
 				lit += string(l.ch)
+				if nexterr := l.next(); nexterr != nil {
+					return token.Illegal, lit, nexterr
+				}
 				base, prefix = 2, 'b'
 			default:
 				base, prefix = 8, '0'
 				digsep = 1 // leading 0
 			}
 		}
-		ds, err := l.scanDigits(base)
-		if err != nil {
-			return token.Illegal, lit, err
-		}
+		litDigits, ds, err := l.scanDigits(base)
+		firsterr = errorIfEmpty(firsterr, err)
+		lit += litDigits
 		digsep |= ds
 	}
 
@@ -323,69 +328,81 @@ func (l *Lexer) scanNumber() (tok token.Token, lit string, err error) {
 	if l.ch == '.' {
 		tok = token.Float
 		if prefix == 'o' || prefix == 'b' {
-			return token.Illegal, lit, fmt.Errorf("invalid radix point in %s", litname(prefix))
-		}
-		if err = l.next(); err != nil {
-			return token.Illegal, lit, err
+			firsterr = errorIfEmpty(
+				firsterr,
+				fmt.Errorf("invalid radix point in %s", litname(prefix)),
+			)
 		}
 		lit += string(l.ch)
-		ds, err := l.scanDigits(base)
-		if err != nil {
-			return token.Illegal, lit, err
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, lit, nexterr
 		}
+		litDigits, ds, err := l.scanDigits(base)
+		firsterr = errorIfEmpty(firsterr, err)
+		lit += litDigits
 		digsep |= ds
 	}
 
 	if digsep&1 == 0 {
-		return token.Illegal, lit, fmt.Errorf("%s has no digits", litname(prefix))
+		firsterr = errorIfEmpty(firsterr, fmt.Errorf("%s has no digits", litname(prefix)))
 	}
 
 	// exponent
 	if e := unicode.ToLower(l.ch); e == 'e' || e == 'p' {
 		switch {
 		case e == 'e' && prefix != 0 && prefix != '0':
-			return token.Illegal, lit, fmt.Errorf("%q exponent requires decimal mantissa", l.ch)
+			firsterr = errorIfEmpty(
+				firsterr,
+				fmt.Errorf("%q exponent requires decimal mantissa", l.ch),
+			)
 		case e == 'p' && prefix != 'x':
-			return token.Illegal, lit, fmt.Errorf("%q exponent requires hexadecimal mantissa", l.ch)
-		}
-		if err = l.next(); err != nil {
-			return token.Illegal, lit, err
+			firsterr = errorIfEmpty(
+				firsterr,
+				fmt.Errorf("%q exponent requires hexadecimal mantissa", l.ch),
+			)
 		}
 		lit += string(l.ch)
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, lit, nexterr
+		}
 		tok = token.Float
 		if l.ch == '+' || l.ch == '-' {
-			if err = l.next(); err != nil {
-				return token.Illegal, lit, err
-			}
 			lit += string(l.ch)
+			if nexterr := l.next(); nexterr != nil {
+				return token.Illegal, lit, nexterr
+			}
 		}
-		ds, err := l.scanDigits(10)
-		if err != nil {
-			return token.Illegal, lit, err
-		}
+		litDigits, ds, err := l.scanDigits(10)
+		firsterr = errorIfEmpty(firsterr, err)
+		lit += litDigits
 		digsep |= ds
 		if ds&1 == 0 {
-			return token.Illegal, lit, errors.New("exponent has no digits")
+			firsterr = errorIfEmpty(firsterr, errors.New("exponent has no digits"))
 		}
 	} else if prefix == 'x' && tok == token.Float {
-		return token.Illegal, lit, errors.New("hexadecimal mantissa requires a 'p' exponent")
+		firsterr = errorIfEmpty(firsterr, errors.New("hexadecimal mantissa requires a 'p' exponent"))
 	}
 
 	// suffix 'i'
 	if l.ch == 'i' {
+		lit += string(l.ch)
 		tok = token.Imaginary
-		if err = l.next(); err != nil {
-			return token.Illegal, lit, err
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, lit, nexterr
 		}
+	}
+
+	if tok != token.Integer && errors.Unwrap(firsterr) == invalidDigitError {
+		firsterr = nil
 	}
 
 	if digsep&2 != 0 {
 		if i := invalidSep(lit); i >= 0 {
-			return token.Illegal, lit, errors.New("'_' must separate successive digits")
+			firsterr = errorIfEmpty(firsterr, errors.New("'_' must separate successive digits"))
 		}
 	}
 
-	return tok, lit, nil
+	return tok, lit, firsterr
 }
 
 // scanDigits accepts the sequence { digit | '_' }.
@@ -394,7 +411,8 @@ func (l *Lexer) scanNumber() (tok token.Token, lit string, err error) {
 // in *invalid, if *invalid < 0.
 // digits returns a bitset describing whether the sequence contained
 // digits (bit 0 is set), or separators '_' (bit 1 is set).
-func (l *Lexer) scanDigits(base int) (digsep int, err error) {
+func (l *Lexer) scanDigits(base int) (lit string, digsep int, err error) {
+	var invalid error
 	if base <= 10 {
 		max := rune('0' + base)
 		for unicode.IsDigit(l.ch) || l.ch == '_' {
@@ -402,13 +420,12 @@ func (l *Lexer) scanDigits(base int) (digsep int, err error) {
 			if l.ch == '_' {
 				ds = 2
 			} else if l.ch >= max {
-				if err != nil {
-					return 0, errors.New("l.ch is invalid")
-				}
+				invalid = fmt.Errorf("%w '%c' in %s", invalidDigitError, l.ch, litnameFromBase(base))
 			}
 			digsep |= ds
-			if err = l.next(); err != nil {
-				return 0, err
+			lit += string(l.ch)
+			if nexterr := l.next(); nexterr != nil {
+				return lit, 0, nexterr
 			}
 		}
 	} else {
@@ -418,28 +435,29 @@ func (l *Lexer) scanDigits(base int) (digsep int, err error) {
 				ds = 2
 			}
 			digsep |= ds
-			if err := l.next(); err != nil {
-				return 0, err
+			lit += string(l.ch)
+			if nexterr := l.next(); nexterr != nil {
+				return lit, 0, nexterr
 			}
 		}
+	}
+	if invalid != nil {
+		err = invalid
 	}
 	return
 }
 
 func (l *Lexer) scanRawString() (lit string, err error) {
-	// '`' opening already consumed
-	lit += string(l.ch)
-
 	hasCR := false
 	for {
 		ch := l.ch
 		if ch < 0 {
 			return lit, errors.New("raw string literal not terminated")
 		}
-		if err := l.next(); err != nil {
-			return lit, err
-		}
 		lit += string(l.ch)
+		if nexterr := l.next(); nexterr != nil {
+			return lit, nexterr
+		}
 		if ch == '`' {
 			break
 		}
@@ -456,16 +474,15 @@ func (l *Lexer) scanRawString() (lit string, err error) {
 }
 
 func (l *Lexer) scanString() (lit string, err error) {
-	lit += string(l.ch)
 	for {
 		ch := l.ch
 		if ch == '\n' || ch < 0 {
 			return "", errors.New("string literal not terminated")
 		}
-		if err := l.next(); err != nil {
-			return "", err
+		lit += string(l.ch)
+		if nexterr := l.next(); nexterr != nil {
+			return "", nexterr
 		}
-		lit += string(ch)
 		if ch == '"' {
 			break
 		}
@@ -478,8 +495,6 @@ func (l *Lexer) scanString() (lit string, err error) {
 }
 
 func (l *Lexer) scanRune() (lit string, err error) {
-	lit += string(l.ch)
-
 	valid := true
 	n := 0
 	for {
@@ -491,10 +506,10 @@ func (l *Lexer) scanRune() (lit string, err error) {
 			}
 			break
 		}
-		if err := l.next(); err != nil {
-			return lit, err
-		}
 		lit += string(l.ch)
+		if nexterr := l.next(); nexterr != nil {
+			return lit, nexterr
+		}
 		// closing quote
 		if ch == '\'' {
 			break
@@ -524,29 +539,30 @@ func (l *Lexer) scanRune() (lit string, err error) {
 // character (without consuming it) and returns false. Otherwise
 // it returns true.
 func (l *Lexer) scanEscape(quote rune) (bool, error) {
+	// TODO: return lit
 	var n int
 	var base, max uint32
 	switch l.ch {
 	case 'a', 'b', 'f', 'n', 'r', 't', 'v', '\\', quote:
-		if err := l.next(); err != nil {
-			return false, err
+		if nexterr := l.next(); nexterr != nil {
+			return false, nexterr
 		}
 		return true, nil
 	case '0', '1', '2', '3', '4', '5', '6', '7':
 		n, base, max = 3, 8, 255
 	case 'x':
-		if err := l.next(); err != nil {
-			return false, err
+		if nexterr := l.next(); nexterr != nil {
+			return false, nexterr
 		}
 		n, base, max = 2, 16, 255
 	case 'u':
-		if err := l.next(); err != nil {
-			return false, err
+		if nexterr := l.next(); nexterr != nil {
+			return false, nexterr
 		}
 		n, base, max = 4, 16, unicode.MaxRune
 	case 'U':
-		if err := l.next(); err != nil {
-			return false, err
+		if nexterr := l.next(); nexterr != nil {
+			return false, nexterr
 		}
 		n, base, max = 8, 16, unicode.MaxRune
 	default:
@@ -568,8 +584,8 @@ func (l *Lexer) scanEscape(quote rune) (bool, error) {
 			return false, errors.New(msg)
 		}
 		x = x*base + d
-		if err := l.next(); err != nil {
-			return false, err
+		if nexterr := l.next(); nexterr != nil {
+			return false, nexterr
 		}
 		n--
 	}
@@ -585,22 +601,22 @@ func (l *Lexer) scanEscape(quote rune) (bool, error) {
 // the offset of the first newline within it, which implies a
 // /*...*/ comment.
 func (l *Lexer) scanComment() (lit string, err error) {
-	lit += string(l.ch)
 	numCR := 0
 
 	if l.ch == '/' {
 		//-style comment
 		// (the final '\n' is not considered part of the comment)
-		if err := l.next(); err != nil {
-			return lit, err
-		}
 		lit += string(l.ch)
+		if nexterr := l.next(); nexterr != nil {
+			return lit, nexterr
+		}
 		for l.ch != '\n' && l.ch >= 0 {
 			if l.ch == '\r' {
 				numCR++
 			}
-			if err := l.next(); err != nil {
-				return lit, err
+			lit += string(l.ch)
+			if nexterr := l.next(); nexterr != nil {
+				return lit, nexterr
 			}
 			lit += string(l.ch)
 		}
@@ -608,25 +624,25 @@ func (l *Lexer) scanComment() (lit string, err error) {
 	}
 
 	/*-style comment */
-	if err := l.next(); err != nil {
-		return lit, err
-	}
 	lit += string(l.ch)
+	if nexterr := l.next(); nexterr != nil {
+		return lit, nexterr
+	}
 	for l.ch >= 0 {
 		ch := l.ch
 		if ch == '\r' {
 			numCR++
 		}
-		if err := l.next(); err != nil {
-			return lit, err
-		}
 		lit += string(l.ch)
+		if nexterr := l.next(); nexterr != nil {
+			return lit, nexterr
+		}
 		// closing comment
 		if ch == '*' && l.ch == '/' {
-			if err := l.next(); err != nil {
-				return lit, err
-			}
 			lit += string(l.ch)
+			if nexterr := l.next(); nexterr != nil {
+				return lit, nexterr
+			}
 			goto exit
 		}
 	}
@@ -703,6 +719,18 @@ func litname(prefix rune) string {
 	return "decimal literal"
 }
 
+func litnameFromBase(base int) string {
+	switch base {
+	case 16:
+		return "hexadecimal literal"
+	case 8:
+		return "octal literal"
+	case 2:
+		return "binary literal"
+	}
+	return "decimal literal"
+}
+
 // Helper functions for scanning multi-byte tokens such as >> += >>= .
 // Different routines recognize different length tok_i based on matches
 // of ch_i. If a token ends in '=', the result is tok1 or tok3
@@ -711,8 +739,8 @@ func litname(prefix rune) string {
 
 func (l *Lexer) switch2(tok0, tok1 token.Token) (token.Token, error) {
 	if l.ch == '=' {
-		if err := l.next(); err != nil {
-			return token.Illegal, err
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, nexterr
 		}
 		return tok1, nil
 	}
@@ -721,14 +749,14 @@ func (l *Lexer) switch2(tok0, tok1 token.Token) (token.Token, error) {
 
 func (l *Lexer) switch3(tok0, tok1 token.Token, ch2 rune, tok2 token.Token) (token.Token, error) {
 	if l.ch == '=' {
-		if err := l.next(); err != nil {
-			return token.Illegal, err
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, nexterr
 		}
 		return tok1, nil
 	}
 	if l.ch == ch2 {
-		if err := l.next(); err != nil {
-			return token.Illegal, err
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, nexterr
 		}
 		return tok2, nil
 	}
@@ -741,18 +769,18 @@ func (l *Lexer) switch4(
 	tok2, tok3 token.Token,
 ) (token.Token, error) {
 	if l.ch == '=' {
-		if err := l.next(); err != nil {
-			return token.Illegal, err
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, nexterr
 		}
 		return tok1, nil
 	}
 	if l.ch == ch2 {
-		if err := l.next(); err != nil {
-			return token.Illegal, err
+		if nexterr := l.next(); nexterr != nil {
+			return token.Illegal, nexterr
 		}
 		if l.ch == '=' {
-			if err := l.next(); err != nil {
-				return token.Illegal, err
+			if nexterr := l.next(); nexterr != nil {
+				return token.Illegal, nexterr
 			}
 			return tok3, nil
 		}
@@ -787,4 +815,11 @@ func stripCR(b []byte, comment bool) []byte {
 		}
 	}
 	return c[:i]
+}
+
+func errorIfEmpty(err error, newerr error) error {
+	if err == nil {
+		return newerr
+	}
+	return err
 }
